@@ -12,6 +12,7 @@ const SR = 22050;
 
 const state = {
   file: null,
+  origUrl: null,
   audioBuffer: null, // original (for playback)
   frames: null,
   onsets: null,
@@ -67,6 +68,8 @@ async function resampleMono(audioBuffer) {
 /* ---------- Pipeline ---------- */
 async function handleFile(file) {
   if (!file) return;
+  if (state.origUrl) URL.revokeObjectURL(state.origUrl);
+  state.origUrl = null;
   state.file = file;
   show('#step-work');
   setProgress(0, 'Décodage de l’audio… 🎧');
@@ -251,22 +254,59 @@ function drawRoll(playhead = null) {
 }
 
 /* ---------- Playback ---------- */
+// iOS: Web Audio is muted by the silent switch unless the audio session is
+// "playback". Safari 16.4+ exposes navigator.audioSession; older versions get
+// the same effect while an <audio> element is playing, so we loop a silent one.
+const SILENT_WAV = (() => {
+  const n = 2205, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, str) => [...str].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 22050, true); v.setUint32(28, 44100, true); v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+})();
+let silentEl = null;
+function unlockAudioSession() {
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
+  if (!silentEl) {
+    silentEl = new Audio(SILENT_WAV);
+    silentEl.loop = true;
+    silentEl.setAttribute('playsinline', '');
+  }
+  silentEl.play().catch(() => {});
+}
+
+let audioCtx = null;
+function getCtx() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AC();
+  if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+
 function stop() {
   if (!state.playing) return;
   const p = state.playing;
   state.playing = null;
-  try { p.ctx.close(); } catch {}
   cancelAnimationFrame(p.raf);
+  if (p.out) {
+    try {
+      p.out.gain.setTargetAtTime(0, p.ctx.currentTime, 0.01);
+      setTimeout(() => p.out.disconnect(), 100);
+    } catch {}
+  }
+  if (p.audio) { p.audio.pause(); p.audio.currentTime = 0; }
+  if (silentEl) silentEl.pause();
   $('#play-midi').textContent = '▶️ Écouter le MIDI';
   $('#play-orig').textContent = '🎧 Écouter l’original';
   drawRoll();
 }
 
-function startPlayhead(ctx, offset) {
-  const t0 = ctx.currentTime;
+function startPlayhead(getTime) {
   const tick = () => {
     if (!state.playing) return;
-    const t = ctx.currentTime - t0 + offset;
+    const t = getTime();
     drawRoll(t);
     if (t > state.audioBuffer.duration + 0.3) return stop();
     state.playing.raf = requestAnimationFrame(tick);
@@ -276,11 +316,15 @@ function startPlayhead(ctx, offset) {
 
 function playMidi() {
   if (state.playing) { const was = state.playing.kind; stop(); if (was === 'midi') return; }
-  const ctx = new AudioContext();
+  if (!state.notes.length) return toast('Aucune note à jouer 🤷');
+  unlockAudioSession();
+  const ctx = getCtx();
+  const out = ctx.createGain();
+  out.gain.value = 1;
   const master = ctx.createGain();
   master.gain.value = 0.25;
   const comp = ctx.createDynamicsCompressor();
-  master.connect(comp).connect(ctx.destination);
+  master.connect(comp).connect(out).connect(ctx.destination);
   const now = ctx.currentTime + 0.1;
   for (const n of state.notes) {
     const t = now + n.startTimeSeconds;
@@ -299,21 +343,22 @@ function playMidi() {
     o.start(t);
     o.stop(t + d + 0.15);
   }
-  state.playing = { ctx, kind: 'midi' };
+  state.playing = { ctx, out, kind: 'midi' };
   $('#play-midi').textContent = '⏹️ Stop';
-  startPlayhead(ctx, -0.1);
+  startPlayhead(() => ctx.currentTime - now);
 }
 
 function playOrig() {
   if (state.playing) { const was = state.playing.kind; stop(); if (was === 'orig') return; }
-  const ctx = new AudioContext();
-  const src = ctx.createBufferSource();
-  src.buffer = state.audioBuffer;
-  src.connect(ctx.destination);
-  src.start();
-  state.playing = { ctx, kind: 'orig' };
+  // A plain <audio> element plays even with the iPhone silent switch on.
+  if (!state.origUrl) state.origUrl = URL.createObjectURL(state.file);
+  const audio = new Audio(state.origUrl);
+  audio.setAttribute('playsinline', '');
+  audio.onended = () => stop();
+  audio.play().catch((e) => { stop(); toast(`Lecture impossible 😵 (${e.message || e})`); });
+  state.playing = { audio, kind: 'orig' };
   $('#play-orig').textContent = '⏹️ Stop';
-  startPlayhead(ctx, 0);
+  startPlayhead(() => audio.currentTime);
 }
 
 /* ---------- Misc ---------- */
@@ -390,7 +435,8 @@ function init() {
   $('#play-orig').addEventListener('click', playOrig);
   $('#again').addEventListener('click', () => {
     stop();
-    Object.assign(state, { frames: null, onsets: null, contours: null, notes: [] });
+    if (state.origUrl) URL.revokeObjectURL(state.origUrl);
+    Object.assign(state, { frames: null, onsets: null, contours: null, notes: [], origUrl: null });
     input.value = '';
     show('#step-drop');
   });
