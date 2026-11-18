@@ -323,16 +323,32 @@ const GM_NAMES = {
   29: 'overdriven_guitar', 33: 'electric_bass_finger', 48: 'string_ensemble_1',
   52: 'choir_aahs', 73: 'flute', 80: 'lead_1_square',
 };
-const instruments = {}; // program -> { inst, ready: Promise<boolean> }
+const instruments = {}; // program -> { inst, ready: Promise<boolean>, ok, pct }
 function loadInstrument(program) {
   const name = GM_NAMES[program];
   if (!name) return null;
   const ctx = getCtx(false);
   if (!instruments[program] || instruments[program].ctx !== ctx) {
-    const inst = Soundfont(ctx, { instrument: name, kit: 'MusyngKite' });
-    const ready = inst.ready.then(() => true).catch((e) => { console.warn('soundfont', e); return false; });
-    instruments[program] = { inst, ready, ctx, ok: null };
-    ready.then((ok) => { instruments[program].ok = ok; });
+    const entry = { ctx, ok: null, pct: 0 };
+    // MP3 decodes everywhere (Safari/iOS can claim Ogg support yet fail to decode it).
+    entry.inst = Soundfont(ctx, {
+      instrumentUrl: `https://gleitz.github.io/midi-js-soundfonts/MusyngKite/${name}-mp3.js`,
+      onLoadProgress: ({ loaded, total }) => {
+        entry.pct = total ? Math.round((loaded / total) * 100) : 0;
+        if (state.playing && state.playing.loading === entry) {
+          $('#play-midi').textContent = `⏳ Chargement… ${entry.pct} %`;
+        }
+      },
+    });
+    const timeout = new Promise((res) => setTimeout(() => res(false), 45000));
+    entry.ready = Promise.race([entry.inst.ready.then(() => true), timeout])
+      .catch((e) => { console.warn('soundfont', e); return false; })
+      .then((ok) => {
+        entry.ok = ok;
+        if (!ok) delete instruments[program]; // retry on next click
+        return ok;
+      });
+    instruments[program] = entry;
   }
   return instruments[program];
 }
@@ -362,25 +378,34 @@ function playSynth(ctx, out, now) {
 }
 
 async function playMidi() {
-  if (state.playing) { const was = state.playing.kind; stop(); if (was === 'midi') return; }
+  if (state.playing) {
+    const was = state.playing.kind;
+    stop();
+    if (was === 'midi') return;
+  }
   if (!state.notes.length) return toast('Aucune note à jouer 🤷');
   unlockAudioSession();
   const ctx = getCtx();
+  const program = settings().program;
   const token = {};
-  state.playing = { ctx, kind: 'midi', token };
+  state.playing = { ctx, kind: 'midi', token, program };
   $('#play-midi').textContent = '⏹️ Stop';
-  const entry = loadInstrument(settings().program);
+  const entry = loadInstrument(program);
   let inst = null;
   if (entry) {
     if (entry.ok === null) {
-      $('#play-midi').textContent = '⏳ Chargement…';
+      state.playing.loading = entry;
+      $('#play-midi').textContent = `⏳ Chargement… ${entry.pct} %`;
       toast('On sort le vrai instrument du placard… 🎻');
     }
-    if (await entry.ready) inst = entry.inst;
-    else toast('Sons introuvables (connexion ?), on joue la version synthé 🤖');
+    const ok = await entry.ready;
     if (!state.playing || state.playing.token !== token) return; // stopped meanwhile
+    state.playing.loading = null;
+    if (ok) inst = entry.inst;
+    else toast('Sons introuvables (connexion ?), on joue la version synthé 🤖');
     $('#play-midi').textContent = '⏹️ Stop';
   }
+  if (ctx.state !== 'running') await ctx.resume().catch(() => {});
   const out = ctx.createGain();
   out.connect(ctx.destination);
   const now = ctx.currentTime + 0.1;
@@ -398,6 +423,16 @@ async function playMidi() {
   }
   Object.assign(state.playing, { out, inst });
   startPlayhead(() => ctx.currentTime - now);
+}
+
+// Switching instrument while the MIDI plays restarts it with the new sound.
+function onProgramChange() {
+  const program = settings().program;
+  loadInstrument(program);
+  if (state.playing && state.playing.kind === 'midi' && state.playing.program !== program) {
+    stop();
+    playMidi();
+  }
 }
 
 function playOrig() {
@@ -482,7 +517,7 @@ function init() {
     }),
   );
   $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
-  $('#program').addEventListener('change', () => loadInstrument(settings().program));
+  $('#program').addEventListener('change', onProgramChange);
   $('#download').addEventListener('click', download);
   $('#play-midi').addEventListener('click', playMidi);
   $('#play-orig').addEventListener('click', playOrig);
