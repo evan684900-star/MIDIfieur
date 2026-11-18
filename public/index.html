@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIDIfieur — MP3 → MIDI</title>
+<meta name="description" content="Transforme n'importe quel MP3 en fichier MIDI, directement dans ton navigateur.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎹</text></svg>">
+<style>
+  :root {
+    --bg: #0f0d1a; --card: #1a1730; --card2: #221e3d; --line: #2f2a52;
+    --txt: #ece9ff; --mut: #9d97c7; --acc: #8b5cf6; --acc2: #f472b6; --ok: #34d399;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 20% -10%, #2b1f5c 0%, transparent 60%),
+                radial-gradient(900px 500px at 110% 10%, #4a1d43 0%, transparent 55%), var(--bg);
+    color: var(--txt);
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 18px 60px; }
+  header { text-align: center; margin-bottom: 26px; }
+  h1 { font-size: clamp(2rem, 6vw, 3.2rem); margin: 0; letter-spacing: -0.02em;
+       background: linear-gradient(90deg, #c4b5fd, var(--acc2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  h1 .emo { -webkit-text-fill-color: initial; color: initial; }
+  header p { color: var(--mut); margin: 8px 0 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px; }
+  .hidden { display: none !important; }
+
+  #drop { border: 2px dashed #4b4380; border-radius: 18px; padding: 56px 20px; text-align: center; cursor: pointer;
+          transition: .2s; background: rgba(139,92,246,.05); }
+  #drop:hover, #drop.over { border-color: var(--acc); background: rgba(139,92,246,.12); transform: scale(1.01); }
+  #drop .big { font-size: 3.4rem; }
+  #drop h2 { margin: 10px 0 6px; }
+  #drop p { color: var(--mut); margin: 0; }
+  .tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 18px; }
+  .tip { background: var(--card2); border-radius: 12px; padding: 12px 14px; font-size: .92rem; color: var(--mut); }
+  .tip b { color: var(--txt); }
+
+  #step-work { text-align: center; padding: 50px 22px; }
+  .spin { font-size: 3rem; display: inline-block; animation: bob 1s ease-in-out infinite alternate; }
+  @keyframes bob { to { transform: translateY(-10px) rotate(-8deg); } }
+  .track { height: 12px; background: var(--card2); border-radius: 99px; overflow: hidden; margin: 18px auto 8px; max-width: 480px; }
+  #bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .2s; }
+  #pct { color: var(--mut); font-variant-numeric: tabular-nums; }
+
+  .top { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  #file-info { color: var(--mut); font-size: .9rem; }
+  #note-count { font-weight: 600; color: var(--ok); }
+  canvas#roll { width: 100%; height: 300px; display: block; background: #120f22; border-radius: 12px; border: 1px solid var(--line); }
+  .btns { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+  button { font: inherit; border: 0; border-radius: 12px; padding: 11px 16px; cursor: pointer; color: var(--txt);
+           background: var(--card2); border: 1px solid var(--line); transition: .15s; }
+  button:hover { border-color: var(--acc); transform: translateY(-1px); }
+  button.main { background: linear-gradient(90deg, var(--acc), var(--acc2)); border: 0; font-weight: 700; }
+
+  #controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px 22px; margin-top: 20px; }
+  .ctl label { display: flex; justify-content: space-between; font-size: .92rem; margin-bottom: 6px; }
+  .ctl label span { color: var(--acc2); font-variant-numeric: tabular-nums; }
+  .ctl small { display: block; color: var(--mut); font-size: .8rem; margin-top: 3px; }
+  input[type=range] { width: 100%; accent-color: var(--acc); }
+  select, input[type=number], input[type=text] { width: 100%; font: inherit; color: var(--txt); background: var(--card2);
+           border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .ctl label.check { display: flex; justify-content: flex-start; gap: 8px; align-items: center; font-size: .92rem; }
+  .check input { accent-color: var(--acc); width: 18px; height: 18px; }
+  h3 { margin: 26px 0 0; font-size: 1.05rem; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 30px); opacity: 0; background: #2a2450;
+           padding: 12px 18px; border-radius: 12px; border: 1px solid var(--acc); transition: .25s; pointer-events: none; }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  footer { text-align: center; color: var(--mut); font-size: .82rem; margin-top: 30px; }
+  footer a { color: #c4b5fd; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="emo">🎹</span> MIDIfieur</h1>
+    <p>Balance un MP3, récupère un .mid. Ton fichier ne quitte jamais ton appareil. 🔒</p>
+  </header>
+
+  <!-- 1. Dépôt -->
+  <section id="step-drop" class="card">
+    <div id="drop">
+      <div class="big">🎵</div>
+      <h2>Glisse ton fichier audio ici</h2>
+      <p>ou clique pour le choisir · MP3, WAV, OGG, M4A, FLAC…</p>
+      <input id="file" type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac" hidden>
+    </div>
+    <div class="tips">
+      <div class="tip"><b>🎯 Le plus précis :</b> un seul instrument (piano, voix, guitare, basse).</div>
+      <div class="tip"><b>🥁 Morceau complet ?</b> Ça marche, mais attends-toi à un joyeux bazar.</div>
+      <div class="tip"><b>⚡ Rapide :</b> tout tourne dans ton navigateur grâce à l’IA Basic Pitch.</div>
+    </div>
+  </section>
+
+  <!-- 2. Analyse -->
+  <section id="step-work" class="card hidden">
+    <div class="spin">🎼</div>
+    <h2 id="work-label">Décodage de l’audio… 🎧</h2>
+    <div class="track"><div id="bar"></div></div>
+    <div id="pct">0 %</div>
+  </section>
+
+  <!-- 3. Résultat -->
+  <section id="step-result" class="card hidden">
+    <div class="top">
+      <div>
+        <div id="note-count">0 note</div>
+        <div id="file-info"></div>
+      </div>
+      <button id="again">🔄 Autre fichier</button>
+    </div>
+    <canvas id="roll"></canvas>
+    <div class="btns">
+      <button id="play-midi">▶️ Écouter le MIDI</button>
+      <button id="play-orig">🎧 Écouter l’original</button>
+      <button id="download" class="main">⬇️ Télécharger le .mid</button>
+    </div>
+
+    <h3>🎛️ Réglages <small style="color:var(--mut);font-weight:400">(mise à jour instantanée, pas besoin de réanalyser)</small></h3>
+    <div id="controls">
+      <div class="ctl">
+        <label for="preset">Type d’instrument</label>
+        <select id="preset">
+          <option value="piano">🎹 Piano</option>
+          <option value="voix">🎤 Voix / mélodie</option>
+          <option value="guitare">🎸 Guitare</option>
+          <option value="basse">🎸 Basse</option>
+          <option value="tout">🎶 Morceau complet</option>
+          <option value="perso">🛠️ Perso</option>
+        </select>
+        <small>Règle tous les curseurs d’un coup.</small>
+      </div>
+      <div class="ctl">
+        <label for="sens">Sensibilité <span id="sens-v"></span></label>
+        <input id="sens" type="range" min="0.05" max="0.95" step="0.01" value="0.5">
+        <small>Plus haut = plus de notes (et plus de fantômes 👻).</small>
+      </div>
+      <div class="ctl">
+        <label for="frameT">Seuil de tenue <span id="frameT-v"></span></label>
+        <input id="frameT" type="range" min="0.05" max="0.8" step="0.01" value="0.3">
+        <small>Plus bas = notes plus longues.</small>
+      </div>
+      <div class="ctl">
+        <label for="minLen">Durée minimale d’une note <span id="minLen-v"></span></label>
+        <input id="minLen" type="range" min="12" max="400" step="1" value="58">
+        <small>Vire les petites notes parasites.</small>
+      </div>
+      <div class="ctl">
+        <label for="minAmp">Anti-fantômes 👻 <span id="minAmp-v"></span></label>
+        <input id="minAmp" type="range" min="0" max="0.8" step="0.01" value="0.4">
+        <small>Ignore les notes trop faibles (souvent des harmoniques).</small>
+      </div>
+      <div class="ctl">
+        <label for="minNote">Note la plus grave <span id="minNote-v"></span></label>
+        <input id="minNote" type="range" min="21" max="108" step="1" value="21">
+      </div>
+      <div class="ctl">
+        <label for="maxNote">Note la plus aiguë <span id="maxNote-v"></span></label>
+        <input id="maxNote" type="range" min="21" max="108" step="1" value="108">
+      </div>
+      <div class="ctl">
+        <div class="row2">
+          <div>
+            <label for="bpm">Tempo (BPM)</label>
+            <input id="bpm" type="number" min="30" max="300" value="120">
+          </div>
+          <div>
+            <label for="quant">Caler sur la grille</label>
+            <select id="quant">
+              <option value="0">Non (exact)</option>
+              <option value="2">Croches</option>
+              <option value="4">Doubles</option>
+              <option value="8">Triples</option>
+              <option value="3">Triolets</option>
+            </select>
+          </div>
+        </div>
+        <small>Mets le vrai tempo du morceau pour qu’il colle à la grille de ton logiciel.</small>
+      </div>
+      <div class="ctl">
+        <label for="program">Instrument dans le MIDI</label>
+        <select id="program">
+          <option value="0">Piano</option>
+          <option value="4">Piano électrique</option>
+          <option value="24">Guitare acoustique</option>
+          <option value="29">Guitare saturée</option>
+          <option value="33">Basse</option>
+          <option value="48">Cordes</option>
+          <option value="52">Chœur</option>
+          <option value="73">Flûte</option>
+          <option value="80">Synthé lead</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <label class="check"><input id="melodia" type="checkbox" checked> Nettoyage intelligent</label>
+        <small>Supprime les harmoniques prises pour des notes.</small>
+        <label class="check" style="margin-top:8px"><input id="bends" type="checkbox"> Pitch bends (vibrato, glissés)</label>
+        <small>Plus fidèle pour la voix, mais plus chargé.</small>
+      </div>
+      <div class="ctl">
+        <label for="base-name">Nom du fichier</label>
+        <input id="base-name" type="text" value="midifieur">
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Propulsé par <a href="https://github.com/spotify/basic-pitch-ts" target="_blank" rel="noopener">Basic Pitch</a> (Spotify, Apache 2.0) · fait avec 💜
+  </footer>
+</div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
