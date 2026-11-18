@@ -6,6 +6,7 @@ import {
   noteFramesToTime,
 } from '@spotify/basic-pitch';
 import { Midi } from '@tonejs/midi';
+import { Soundfont } from 'smplr';
 
 const $ = (s) => document.querySelector(s);
 const SR = 22050;
@@ -103,6 +104,7 @@ async function handleFile(file) {
     $('#base-name').value = file.name.replace(/\.[^.]+$/, '');
     show('#step-result');
     recompute();
+    loadInstrument(settings().program);
   } catch (e) {
     console.error(e);
     show('#step-drop');
@@ -278,10 +280,10 @@ function unlockAudioSession() {
 }
 
 let audioCtx = null;
-function getCtx() {
+function getCtx(resume = true) {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AC();
-  if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+  if (resume && audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
@@ -296,6 +298,7 @@ function stop() {
       setTimeout(() => p.out.disconnect(), 100);
     } catch {}
   }
+  if (p.inst) { try { p.inst.stop(); } catch {} }
   if (p.audio) { p.audio.pause(); p.audio.currentTime = 0; }
   if (silentEl) silentEl.pause();
   $('#play-midi').textContent = '▶️ Écouter le MIDI';
@@ -314,18 +317,31 @@ function startPlayhead(getTime) {
   tick();
 }
 
-function playMidi() {
-  if (state.playing) { const was = state.playing.kind; stop(); if (was === 'midi') return; }
-  if (!state.notes.length) return toast('Aucune note à jouer 🤷');
-  unlockAudioSession();
-  const ctx = getCtx();
-  const out = ctx.createGain();
-  out.gain.value = 1;
+// Real instrument samples (General MIDI soundfonts), one per program.
+const GM_NAMES = {
+  0: 'acoustic_grand_piano', 4: 'electric_piano_1', 24: 'acoustic_guitar_nylon',
+  29: 'overdriven_guitar', 33: 'electric_bass_finger', 48: 'string_ensemble_1',
+  52: 'choir_aahs', 73: 'flute', 80: 'lead_1_square',
+};
+const instruments = {}; // program -> { inst, ready: Promise<boolean> }
+function loadInstrument(program) {
+  const name = GM_NAMES[program];
+  if (!name) return null;
+  const ctx = getCtx(false);
+  if (!instruments[program] || instruments[program].ctx !== ctx) {
+    const inst = Soundfont(ctx, { instrument: name, kit: 'MusyngKite' });
+    const ready = inst.ready.then(() => true).catch((e) => { console.warn('soundfont', e); return false; });
+    instruments[program] = { inst, ready, ctx, ok: null };
+    ready.then((ok) => { instruments[program].ok = ok; });
+  }
+  return instruments[program];
+}
+
+function playSynth(ctx, out, now) {
   const master = ctx.createGain();
   master.gain.value = 0.25;
   const comp = ctx.createDynamicsCompressor();
-  master.connect(comp).connect(out).connect(ctx.destination);
-  const now = ctx.currentTime + 0.1;
+  master.connect(comp).connect(out);
   for (const n of state.notes) {
     const t = now + n.startTimeSeconds;
     const d = Math.max(0.05, n.durationSeconds);
@@ -343,8 +359,44 @@ function playMidi() {
     o.start(t);
     o.stop(t + d + 0.15);
   }
-  state.playing = { ctx, out, kind: 'midi' };
+}
+
+async function playMidi() {
+  if (state.playing) { const was = state.playing.kind; stop(); if (was === 'midi') return; }
+  if (!state.notes.length) return toast('Aucune note à jouer 🤷');
+  unlockAudioSession();
+  const ctx = getCtx();
+  const token = {};
+  state.playing = { ctx, kind: 'midi', token };
   $('#play-midi').textContent = '⏹️ Stop';
+  const entry = loadInstrument(settings().program);
+  let inst = null;
+  if (entry) {
+    if (entry.ok === null) {
+      $('#play-midi').textContent = '⏳ Chargement…';
+      toast('On sort le vrai instrument du placard… 🎻');
+    }
+    if (await entry.ready) inst = entry.inst;
+    else toast('Sons introuvables (connexion ?), on joue la version synthé 🤖');
+    if (!state.playing || state.playing.token !== token) return; // stopped meanwhile
+    $('#play-midi').textContent = '⏹️ Stop';
+  }
+  const out = ctx.createGain();
+  out.connect(ctx.destination);
+  const now = ctx.currentTime + 0.1;
+  if (inst) {
+    for (const n of state.notes) {
+      inst.start({
+        note: n.pitchMidi,
+        velocity: Math.round(30 + Math.min(1, n.amplitude) * 97),
+        time: now + n.startTimeSeconds,
+        duration: Math.max(0.05, n.durationSeconds),
+      });
+    }
+  } else {
+    playSynth(ctx, out, now);
+  }
+  Object.assign(state.playing, { out, inst });
   startPlayhead(() => ctx.currentTime - now);
 }
 
@@ -430,6 +482,7 @@ function init() {
     }),
   );
   $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
+  $('#program').addEventListener('change', () => loadInstrument(settings().program));
   $('#download').addEventListener('click', download);
   $('#play-midi').addEventListener('click', playMidi);
   $('#play-orig').addEventListener('click', playOrig);

@@ -16,6 +16,9 @@ npx esbuild src/main.js --bundle --minify --format=iife --target=es2019 --outfil
 cp -r node_modules/@spotify/basic-pitch/model public/
 ```
 
+## Écoute
+Le bouton « Écouter le MIDI » joue de vrais instruments enregistrés (banque de sons General MIDI *MusyngKite*, via [smplr](https://github.com/danigb/smplr)). L'instrument suit le menu « Instrument ». Les sons sont téléchargés depuis gleitz.github.io au premier clic. Sans connexion, le site joue une version synthé.
+
 ## Précision
 Sur un test (gamme, accord de 4 notes, arpège), il a trouvé 16 notes sur 16, avec un décalage de moins de 15 ms.
 Pour un morceau complet, sépare d'abord les pistes (par exemple avec Demucs), puis passe chaque piste dans le site.
