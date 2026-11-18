@@ -1,10 +1,6 @@
 import * as tf from '@tensorflow/tfjs';
-import {
-  BasicPitch,
-  outputToNotesPoly,
-  addPitchBendsToNoteEvents,
-  noteFramesToTime,
-} from '@spotify/basic-pitch';
+import { BasicPitch, addPitchBendsToNoteEvents, noteFramesToTime } from '@spotify/basic-pitch';
+import { notesPoly, toFlat } from './notes.js';
 import { Midi } from '@tonejs/midi';
 import { Soundfont } from 'smplr';
 
@@ -15,8 +11,8 @@ const state = {
   file: null,
   origUrl: null,
   audioBuffer: null, // original (for playback)
-  frames: null,
-  onsets: null,
+  frames: null, // Float32Array, nFrames * 88 (never modified)
+  onsets: null, // Float32Array, nFrames * 88 (never modified)
   contours: null,
   notes: [], // NoteEventTime[]
   playing: null,
@@ -95,8 +91,8 @@ async function handleFile(file) {
         setProgress(p, funny[i]);
       },
     );
-    state.frames = frames;
-    state.onsets = onsets;
+    state.frames = toFlat(frames);
+    state.onsets = toFlat(onsets);
     state.contours = contours;
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     $('#file-info').textContent =
@@ -135,17 +131,14 @@ function recompute() {
   const s = settings();
   // frames are ~11.6 ms each (256 hop @ 22050)
   const minLenFrames = Math.max(1, Math.round(s.minLenMs / (1000 * 256 / SR)));
-  let ev = outputToNotesPoly(
-    state.frames,
-    state.onsets,
-    s.onset,
-    s.frame,
-    minLenFrames,
-    true,
-    midiToHz(s.maxMidi + 0.5),
-    midiToHz(s.minMidi - 0.5),
-    s.melodia,
-  );
+  let ev = notesPoly(state.frames, state.onsets, {
+    onsetThresh: s.onset,
+    frameThresh: s.frame,
+    minNoteLen: minLenFrames,
+    minMidi: s.minMidi,
+    maxMidi: s.maxMidi,
+    melodia: s.melodia,
+  });
   if (s.bends) ev = addPitchBendsToNoteEvents(state.contours, ev);
   let notes = noteFramesToTime(ev).filter(
     (n) => n.pitchMidi >= s.minMidi && n.pitchMidi <= s.maxMidi && n.amplitude >= s.minAmp,
@@ -160,6 +153,7 @@ function recompute() {
   }
   notes.sort((a, b) => a.startTimeSeconds - b.startTimeSeconds || a.pitchMidi - b.pitchMidi);
   state.notes = notes;
+  rollCache = null;
   $('#note-count').textContent = `${notes.length} note${notes.length > 1 ? 's' : ''} détectée${notes.length > 1 ? 's' : ''}`;
   drawRoll();
 }
@@ -208,15 +202,19 @@ function download() {
 }
 
 /* ---------- Piano roll ---------- */
-function drawRoll(playhead = null) {
+// The notes are drawn once into an offscreen canvas (on recompute / resize);
+// during playback each frame only copies it and draws the playhead.
+let rollCache = null;
+function renderRollCache() {
   const cv = $('#roll');
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth, H = cv.clientHeight;
-  if (cv.width !== W * dpr || cv.height !== H * dpr) {
-    cv.width = W * dpr;
-    cv.height = H * dpr;
-  }
-  const g = cv.getContext('2d');
+  if (!W || !H) { rollCache = null; return; }
+  const off = rollCache && rollCache.canvas.width === W * dpr && rollCache.canvas.height === H * dpr
+    ? rollCache.canvas : document.createElement('canvas');
+  off.width = W * dpr;
+  off.height = H * dpr;
+  const g = off.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
   const notes = state.notes;
@@ -245,13 +243,28 @@ function drawRoll(playhead = null) {
     const y = H - (n.pitchMidi - lo + 1) * rh;
     const hue = 260 + (n.pitchMidi % 12) * 8;
     g.fillStyle = `hsla(${hue}, 85%, ${45 + n.amplitude * 25}%, 0.95)`;
-    g.beginPath();
-    g.roundRect ? g.roundRect(x, y + 0.5, w, Math.max(1.5, rh - 1), 2) : g.rect(x, y + 0.5, w, Math.max(1.5, rh - 1));
-    g.fill();
+    g.fillRect(x, y + 0.5, w, Math.max(1.5, rh - 1));
   }
+  rollCache = { canvas: off, W, H, xs };
+}
+
+function drawRoll(playhead = null) {
+  const cv = $('#roll');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!rollCache || rollCache.W !== W || rollCache.H !== H) renderRollCache();
+  if (!rollCache) return;
+  if (cv.width !== W * dpr || cv.height !== H * dpr) {
+    cv.width = W * dpr;
+    cv.height = H * dpr;
+  }
+  const g = cv.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.clearRect(0, 0, cv.width, cv.height);
+  g.drawImage(rollCache.canvas, 0, 0);
   if (playhead != null) {
     g.fillStyle = '#ffd166';
-    g.fillRect(playhead * xs, 0, 2, H);
+    g.fillRect(Math.round(playhead * rollCache.xs * dpr), 0, 2 * dpr, cv.height);
   }
 }
 
@@ -292,13 +305,17 @@ function stop() {
   const p = state.playing;
   state.playing = null;
   cancelAnimationFrame(p.raf);
+  clearInterval(p.pump);
   if (p.out) {
     try {
       p.out.gain.setTargetAtTime(0, p.ctx.currentTime, 0.01);
       setTimeout(() => p.out.disconnect(), 100);
     } catch {}
   }
-  if (p.inst) { try { p.inst.stop(); } catch {} }
+  if (p.inst) {
+    try { p.inst.scheduler.stop(); } catch {}
+    try { p.inst.stop(); } catch {}
+  }
   if (p.audio) { p.audio.pause(); p.audio.currentTime = 0; }
   if (silentEl) silentEl.pause();
   $('#play-midi').textContent = '▶️ Écouter le MIDI';
@@ -353,28 +370,38 @@ function loadInstrument(program) {
   return instruments[program];
 }
 
-function playSynth(ctx, out, now) {
-  const master = ctx.createGain();
-  master.gain.value = 0.25;
-  const comp = ctx.createDynamicsCompressor();
-  master.connect(comp).connect(out);
-  for (const n of state.notes) {
-    const t = now + n.startTimeSeconds;
-    const d = Math.max(0.05, n.durationSeconds);
-    const o = ctx.createOscillator();
-    o.type = 'triangle';
-    o.frequency.value = midiToHz(n.pitchMidi);
-    const gn = ctx.createGain();
-    const v = 0.2 + n.amplitude * 0.6;
-    gn.gain.setValueAtTime(0, t);
-    gn.gain.linearRampToValueAtTime(v, t + 0.008);
-    gn.gain.exponentialRampToValueAtTime(v * 0.4, t + Math.min(d, 0.3));
-    gn.gain.setValueAtTime(v * 0.4, t + d);
-    gn.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.12);
-    o.connect(gn).connect(master);
-    o.start(t);
-    o.stop(t + d + 0.15);
-  }
+function synthNote(ctx, master, n, t) {
+  const d = Math.max(0.05, n.durationSeconds);
+  const o = ctx.createOscillator();
+  o.type = 'triangle';
+  o.frequency.value = midiToHz(n.pitchMidi);
+  const gn = ctx.createGain();
+  const v = 0.2 + n.amplitude * 0.6;
+  gn.gain.setValueAtTime(0, t);
+  gn.gain.linearRampToValueAtTime(v, t + 0.008);
+  gn.gain.exponentialRampToValueAtTime(v * 0.4, t + Math.min(d, 0.3));
+  gn.gain.setValueAtTime(v * 0.4, t + d);
+  gn.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.12);
+  o.connect(gn).connect(master);
+  o.start(t);
+  o.stop(t + d + 0.15);
+}
+
+// Notes are sent to the audio engine a little ahead of time (lookahead), never
+// the whole song at once: Stop really stops, the phone isn't flooded, and
+// settings changed during playback are heard right away.
+const LOOKAHEAD = 0.8;
+function startPump(ctx, now, playNote) {
+  let cursor = -Infinity;
+  const pump = () => {
+    const until = ctx.currentTime - now + LOOKAHEAD;
+    for (const n of state.notes) {
+      if (n.startTimeSeconds >= cursor && n.startTimeSeconds < until) playNote(n, now + n.startTimeSeconds);
+    }
+    cursor = until;
+  };
+  pump();
+  return setInterval(pump, 200);
 }
 
 async function playMidi() {
@@ -406,21 +433,25 @@ async function playMidi() {
     $('#play-midi').textContent = '⏹️ Stop';
   }
   if (ctx.state !== 'running') await ctx.resume().catch(() => {});
+  if (!state.playing || state.playing.token !== token) return;
   const out = ctx.createGain();
   out.connect(ctx.destination);
   const now = ctx.currentTime + 0.1;
+  let playNote;
   if (inst) {
-    for (const n of state.notes) {
-      inst.start({
-        note: n.pitchMidi,
-        velocity: Math.round(30 + Math.min(1, n.amplitude) * 97),
-        time: now + n.startTimeSeconds,
-        duration: Math.max(0.05, n.durationSeconds),
-      });
-    }
+    playNote = (n, t) => inst.start({
+      note: n.pitchMidi,
+      velocity: Math.round(30 + Math.min(1, n.amplitude) * 97),
+      time: Math.max(t, ctx.currentTime),
+      duration: Math.max(0.05, n.durationSeconds),
+    });
   } else {
-    playSynth(ctx, out, now);
+    const master = ctx.createGain();
+    master.gain.value = 0.25;
+    master.connect(ctx.createDynamicsCompressor()).connect(out);
+    playNote = (n, t) => synthNote(ctx, master, n, Math.max(t, ctx.currentTime));
   }
+  state.playing.pump = startPump(ctx, now, playNote);
   Object.assign(state.playing, { out, inst });
   startPlayhead(() => ctx.currentTime - now);
 }
@@ -513,7 +544,7 @@ function init() {
       updateLabels();
       if (['sens', 'frameT', 'minLen', 'minAmp', 'minNote', 'maxNote', 'melodia'].includes(el.id)) $('#preset').value = 'perso';
       clearTimeout(deb);
-      deb = setTimeout(recompute, 60);
+      deb = setTimeout(recompute, 80);
     }),
   );
   $('#preset').addEventListener('change', (e) => applyPreset(e.target.value));
@@ -528,7 +559,7 @@ function init() {
     input.value = '';
     show('#step-drop');
   });
-  window.addEventListener('resize', () => drawRoll());
+  window.addEventListener('resize', () => { rollCache = null; drawRoll(); });
   updateLabels();
   // preload the model while the user picks a file
   tf.ready().then(() => getModel().model).catch(() => {});
